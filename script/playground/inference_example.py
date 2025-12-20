@@ -5,7 +5,18 @@ Example inference using RosettaModel with Qwen3-0.6B and Qwen3-1.7B models and M
 import torch
 import sys
 import os
+import logging
 from pathlib import Path
+
+# 设置全局log level
+logging.basicConfig(
+    level=logging.DEBUG,  # 可以改为 DEBUG, WARNING, ERROR, CRITICAL
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()  # 输出到控制台
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Add the project root to the path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -243,6 +254,7 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
         raise KeyError("checkpoints_dir must be provided under model.rosetta_config (preferred) or eval config (legacy)")
     slm_model_path = rosetta_config["base_model"]
     llm_model_path = rosetta_config["teacher_model"]
+    logger.info(f"Loading Rosetta model with SLM: {slm_model_path}, LLM: {llm_model_path}, checkpoints from: {checkpoint_dir}")
 
     # Load tokenizer
     slm_tokenizer = AutoTokenizer.from_pretrained(str(slm_model_path))
@@ -262,6 +274,7 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
     ).eval()
     
     # Load projectors
+
     num_projectors = len([f for f in os.listdir(checkpoint_dir) if re.match(r"projector_\d+\.pt", f)])
     projector_list = []
     for t in range(num_projectors):
@@ -273,7 +286,7 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
             state_dict = torch.load(pt_path, map_location=device)
             proj.load_state_dict(state_dict, strict=False)
         projector_list.append(proj)
-    
+    logger.info(f"Loading projectors...{projector_list}")
     # Load aggregators
     num_aggregators = len([f for f in os.listdir(checkpoint_dir) if re.match(r"aggregator_\d+\.pt", f)])
     aggregator_list = []
@@ -286,6 +299,7 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
             agg.load_state_dict(sd, strict=False)
         agg = agg.to(device)
         aggregator_list.append(agg)
+    logger.info(f"Loading aggregators...{aggregator_list}")
     
     # Initialize Rosetta model
     rosetta_model = RosettaModel(
@@ -294,6 +308,8 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
         projector_list=projector_list,
         aggregator_list=aggregator_list,
     ).to(device).eval()
+
+    logger.info(f"Rosetta model loaded successfully:{rosetta_model}")
 
     # Load projector/aggregator mapping configs
     proj_cfg_path = os.path.join(checkpoint_dir, "projector_config.json")

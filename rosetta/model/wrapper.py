@@ -3,12 +3,15 @@ The ensemble of multiple standard transformers LLM models, with automatic kv-cac
 """
 
 from typing import List, Optional, Union
+import logging
 import torch
 from torch import nn
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_utils import PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 import json
+
+logger = logging.getLogger(__name__)
 
 from rosetta.model.projector import Projector
 from rosetta.model.sampling import sample_token
@@ -91,6 +94,52 @@ class RosettaModel(nn.Module):
         for aggregator in self.aggregator_list:
             aggregator.to(device)
         return self
+    
+    def __repr__(self):
+        """Return a string representation of the RosettaModel."""
+        model_names = []
+        for i, model in enumerate(self.model_list):
+            model_type = type(model).__name__
+            is_base = " (base)" if i == self.base_model_idx else ""
+            model_names.append(f"    [{i}] {model_type}{is_base}")
+        
+        models_str = "\n".join(model_names)
+        
+        # Count projector configurations
+        total_projections = 0
+        if self.projector_dict:
+            for target_idx in self.projector_dict:
+                for source_idx in self.projector_dict[target_idx]:
+                    for layer_idx in self.projector_dict[target_idx][source_idx]:
+                        total_projections += len(self.projector_dict[target_idx][source_idx][layer_idx])
+        
+        # Format kv_cache_dict info
+        cache_info = "empty"
+        if self.kv_cache_dict:
+            cache_entries = []
+            for target_idx in self.kv_cache_dict:
+                for source_idx in self.kv_cache_dict[target_idx]:
+                    cache = self.kv_cache_dict[target_idx][source_idx]
+                    if cache is not None:
+                        if hasattr(cache, 'key_cache') and hasattr(cache, 'value_cache'):
+                            num_layers = len(cache.key_cache)
+                            if num_layers > 0:
+                                # Get shape from first layer
+                                key_shape = tuple(cache.key_cache[0].shape)
+                                cache_entries.append(f"target={target_idx},source={source_idx}: {num_layers} layers, shape={key_shape}")
+            cache_info = "\n    ".join(cache_entries) if cache_entries else "empty"
+        
+        return (
+            f"RosettaModel(\n"
+            f"  models={len(self.model_list)},\n"
+            f"{models_str}\n"
+            f"  projectors={len(self.projector_list)} (mappings={total_projections}),\n"
+            f"  aggregators={len(self.aggregator_list)},\n"
+            f"  fusion_mode='{self.multi_source_fusion_mode}',\n"
+            f"  kv_cache: {cache_info},\n"
+            f"  device={self.device}\n"
+            f")"
+        )
         
     # set projector 
     def set_projector_config(self, 
@@ -495,6 +544,7 @@ class RosettaModel(nn.Module):
         - Samples tokens via rosetta.model.sampling.sample_token.
         Returns a tensor of shape [batch, prompt_len + generated_len] for the base model stream.
         """
+        logger.debug(f"Starting generation with max_new_tokens={max_new_tokens}, do_sample={do_sample}, temperature={temperature}")
         # Derive number of tokens to generate
         # If max_new_tokens not provided, infer from max_length
         if isinstance(input_ids, list):
@@ -539,6 +589,7 @@ class RosettaModel(nn.Module):
         batch_size = base_input_ids.size(0)
 
         # Prefill to build caches and obtain initial logits
+        logger.debug(f"Starting prefill phase with prompt length={prompt_len}")
         prefill_output = self.forward(
             kv_cache_index=kv_cache_index,
             input_ids=input_ids,
@@ -549,6 +600,7 @@ class RosettaModel(nn.Module):
             *args,
             **kwargs,
         )
+        logger.debug(f"Prefill phase completed")
 
         current_past = prefill_output.past_key_values
         all_input_ids = base_input_ids
@@ -671,6 +723,9 @@ class RosettaModel(nn.Module):
         # End streaming if streamer provided
         if streamer is not None:
             streamer.end()
+
+        generated_tokens = all_input_ids.size(1) - prompt_len
+        logger.debug(f"Generation completed: generated {generated_tokens} tokens")
 
         # Return style compatible with HF generate
         if return_dict_in_generate:
