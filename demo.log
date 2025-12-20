@@ -1,7 +1,9 @@
 2025-12-19 20:31:40,024 - datasets - DEBUG - PyTorch version 2.6.0 available.
 2025-12-19 20:31:40,814 - urllib3.connectionpool - DEBUG - Starting new HTTPS connection (1): huggingface.co:443
 2025-12-19 20:31:40,891 - urllib3.connectionpool - DEBUG - https://huggingface.co:443 "GET /api/models/nics-efc/C2C_Fuser/revision/main HTTP/1.1" 200 30238
-Fetching 59 files:   0%|          | 0/59 [00:00<?, ?it/s]Fetching 59 files: 100%|██████████| 59/59 [00:00<00:00, 6178.10it/s]
+
+Fetching 59 files:   0%|          | 0/59 [00:00<?, ?it/s]
+Fetching 59 files: 100%|██████████| 59/59 [00:00<00:00, 6178.10it/s]
 2025-12-19 20:31:40,911 - script.playground.inference_example - INFO - Loading Rosetta model with SLM: Qwen/Qwen3-0.6B, LLM: Qwen/Qwen2.5-0.5B-Instruct, checkpoints from: /scratch/yf3005/.cache/huggingface/hub/models--nics-efc--C2C_Fuser/snapshots/909c76d71cfb946171aa2ab7912dd07c0ba2e995/qwen3_0.6b+qwen2.5_0.5b_Fuser/final
 2025-12-19 20:31:40,935 - urllib3.connectionpool - DEBUG - https://huggingface.co:443 "HEAD /Qwen/Qwen3-0.6B/resolve/main/tokenizer_config.json HTTP/1.1" 307 0
 2025-12-19 20:31:40,941 - urllib3.connectionpool - DEBUG - https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer_config.json HTTP/1.1" 200 0
@@ -16,7 +18,9 @@
 2025-12-19 20:31:43,645 - urllib3.connectionpool - DEBUG - https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-0.5B-Instruct/resolve/main/generation_config.json HTTP/1.1" 307 0
 2025-12-19 20:31:43,650 - urllib3.connectionpool - DEBUG - https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2.5-0.5B-Instruct/7ae557604adf67be50417f59c2c2f167def9a775/generation_config.json HTTP/1.1" 200 0
 2025-12-19 20:31:43,674 - urllib3.connectionpool - DEBUG - https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-0.5B-Instruct/resolve/main/custom_generate/generate.py HTTP/1.1" 404 0
-2025-12-19 20:31:51,209 - script.playground.inference_example - INFO - Loading projectors...[C2CProjector(
+2025-12-19 20:31:51,209 - script.playground.inference_example - INFO - Loading projectors...
+
+[C2CProjector(
   (key_in): Linear(in_features=1152, out_features=1024, bias=True)
   (value_in): Linear(in_features=1152, out_features=1024, bias=True)
   (key_mlp1): RegularMLP(

@@ -286,7 +286,7 @@ def load_rosetta_model(model_config: Dict[str, Any], eval_config: Dict[str, Any]
             state_dict = torch.load(pt_path, map_location=device)
             proj.load_state_dict(state_dict, strict=False)
         projector_list.append(proj)
-    logger.info(f"Loading projectors...{projector_list}")
+    logger.info(f"Loading projectors...with element {projector_list[0]} and total count {len(projector_list)}")
     # Load aggregators
     num_aggregators = len([f for f in os.listdir(checkpoint_dir) if re.match(r"aggregator_\d+\.pt", f)])
     aggregator_list = []

@@ -250,6 +250,7 @@ class RosettaModel(nn.Module):
         if config_path.endswith(".json"):
             loaded = RosettaModel.load_json(config_path)
             self.projector_dict = RosettaModel._convert_dict_keys_to_ints(loaded)
+        logger.info(f"Loaded projector config: {self.projector_dict}")
 
     def save_aggregator_config(self, file_name):
         with open(file_name, "w") as f:
