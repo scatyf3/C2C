@@ -298,9 +298,18 @@ class RosettaModel(nn.Module):
             - >0: Bitmask selecting sharers (1 (001)=sharer1, 2 (010)=sharer2, 3 (011)=both, 7 (111)=all three)
             Each bit corresponds to a sharer: bit i selects sharer at model_list[i+1].
         
+        
+        kv_cache_index        # List，长度 = num_sections（段落数）
+            └─ [i]              # 第 i 个段落的 tensor，shape: (B, sec_seq_len, 2)
+                └─ [0]          # Batch 维度的第 0 个样本
+                    └─ [0]      # 该段落序列的第 0 个 token 位置
+                        └─ [0]  # 最后一维（大小为2）的第 0 个元素（控制位）
+        len(kv_cache_index) = num_sections
+        sec_seq_len 标识本段长度
+
         input_ids: If LongTensor, same input for all models. If List, per-model inputs.
         """
-        
+        logger.debug(f"RosettaModel forward called, with kv_cache_index={kv_cache_index}")
         # noqa
         self.kv_cache_dict = dict()
 
@@ -317,22 +326,27 @@ class RosettaModel(nn.Module):
             _, seqlen = input_ids.size() if input_ids is not None else (0, 0)
 
         num_sections = len(kv_cache_index) if kv_cache_index is not None else 1
-
+        logger.debug(f"RosettaModel forward: seqlen={seqlen}, num_sections={num_sections}")
         section_lengths = [kv_cache_index[i].shape[1] for i in range(num_sections)] if kv_cache_index is not None else [seqlen]
+        logger.debug(f"parsing section lengths: {section_lengths}")
         section_starts = [0]
         for l in section_lengths:
             section_starts.append(section_starts[-1] + l)
+        logger.debug(f"computed section starts: {section_starts}")
         
         curr_base_kv_cache = past_key_values
 
         if seqlen >= 1:
+            logger.debug("Entering prefill phase, fuse kv cache accourding to kv_cache_index")
             for i in range(num_sections):
+                logger.debug(f"Processing section {i+1}/{num_sections}")
                 start = section_starts[i]
                 end = section_starts[i + 1]
                 prefill_input_ids = base_input_ids[:, start:end] if base_input_ids is not None else None
                 prefill_attention_mask = base_attention_mask[:, :end] if base_attention_mask is not None else None
                 prefill_position_ids = position_ids[:, start:end] if position_ids is not None else None
                 prefill_labels = labels[:, start:end] if labels is not None else None
+                logger.debug(f"Prefill inputs: input_ids shape={prefill_input_ids.shape if prefill_input_ids is not None else None}, attention_mask shape={prefill_attention_mask.shape if prefill_attention_mask is not None else None}, position_ids shape={prefill_position_ids.shape if prefill_position_ids is not None else None}, labels shape={prefill_labels.shape if prefill_labels is not None else None}")
 
                 output = self.model_list[self.base_model_idx].forward(
                     input_ids=prefill_input_ids,
@@ -347,6 +361,8 @@ class RosettaModel(nn.Module):
                     **kwargs
                 )
 
+                logger.debug(f"Base model output obtained for section {i+1}")
+
                 if self.base_model_idx not in self.kv_cache_dict:
                     self.kv_cache_dict[self.base_model_idx] = {}
                 if self.base_model_idx not in self.kv_cache_dict[self.base_model_idx]:
@@ -354,8 +370,19 @@ class RosettaModel(nn.Module):
                 self.kv_cache_dict[self.base_model_idx][self.base_model_idx] = output.past_key_values
 
                 curr_base_kv_cache: DynamicCache = output.past_key_values
+                if curr_base_kv_cache is not None:
+                    num_layers = len(curr_base_kv_cache.key_cache)
+                    if num_layers > 0:
+                        first_key_shape = curr_base_kv_cache.key_cache[0].shape
+                        first_value_shape = curr_base_kv_cache.value_cache[0].shape
+                        logger.debug(f"Current KV Cache for base model - num_layers: {num_layers}, key_shape: {first_key_shape}, value_shape: {first_value_shape}")
+                    else:
+                        logger.debug(f"Current KV Cache for base model - num_layers: {num_layers}, but empty")
+                else:
+                    logger.debug(f"Current KV Cache for base model is None")
 
                 if i != num_sections - 1:
+                    logger.debug(f"if this is not the last section, process source models for kv-cache projection")
                     for source_model_idx in range(1, len(self.model_list)):
                         if self.base_model_idx not in self.kv_cache_dict:
                             self.kv_cache_dict[self.base_model_idx] = {}
@@ -363,6 +390,7 @@ class RosettaModel(nn.Module):
                             self.kv_cache_dict[self.base_model_idx][source_model_idx] = None
 
                         # Get model-specific input_ids and attention_mask
+                        logger.debug(f"Processing source model's attention mask for kv-cache projection")
                         if isinstance(input_ids, list):
                             source_input_ids = input_ids[source_model_idx]
                             source_attention_mask = attention_mask[source_model_idx] if attention_mask is not None else None
@@ -372,7 +400,7 @@ class RosettaModel(nn.Module):
                             # Backward compatibility: use same input for all models
                             source_prefill_input_ids = prefill_input_ids
                             source_prefill_attention_mask = prefill_attention_mask
-
+                        #  这段代码的作用是保存并临时修改 source model 的状态，执行完后恢复原状态，确保不干扰模型的正常运行。
                         model = self.model_list[source_model_idx]
                         was_training = model.training
                         had_gc = getattr(model, "is_gradient_checkpointing", False)
@@ -405,33 +433,42 @@ class RosettaModel(nn.Module):
                 # calculate source model kvcache and apply projections
                 if self.base_model_idx in self.projector_dict:
                     sharer_mask = kv_cache_index[i][0][0][0].item()
+                    logger.debug(f"Section {i+1}: sharer_mask={sharer_mask}")
                     if sharer_mask > 0:
+                        logger.debug(">0: Bitmask selecting sharers (1 (001)=sharer1, 2 (010)=sharer2, 3 (011)=both, 7 (111)=all three)")
                         base_cache = clone_kv_cache(curr_base_kv_cache)
                         parallel_delta_cache = {} if self.multi_source_fusion_mode == "parallel" else None
                         
+                        logger.debug("iterating over source models for projection")
                         # Compute and apply projections for selected sharers (bitmask)
+                        # 遍历全部的source model，但按paper/demo说的只有一个罢，当然也可能有多个
                         for source_model_idx in self.projector_dict[self.base_model_idx].keys():
                             # Check if this sharer is selected: bit (source_model_idx - 1)
                             if not (sharer_mask & (1 << (source_model_idx - 1))):
+                                logger.debug(f"Skipping source model {source_model_idx} as it is not selected in sharer_mask")
                                 continue
                             if self.multi_source_fusion_mode == "sequential":
                                 base_cache_ref = curr_base_kv_cache
                             else:
                                 # Parallel: always project from the clean cloned base cache
                                 base_cache_ref = base_cache
-
+                            logger.debug(f"Processing source model in each target layer  for projection")
                             for target_layer_idx, entry in self.projector_dict[self.base_model_idx][source_model_idx].items():
+                                logger.debug(f"Target layer {target_layer_idx} with projector entry: {entry}")
                                 # Get base KV cache slice for projection
                                 base_key_cache, base_value_cache = base_cache_ref[target_layer_idx]
                                 new_base_key_cache = base_key_cache[:, :, start:end, :]
                                 new_base_value_cache = base_value_cache[:, :, start:end, :]
                                 new_base_kv_cache = (new_base_key_cache, new_base_value_cache)
+                                logger.debug(f"New base KV cache slice shapes - key: {new_base_key_cache.shape}, value: {new_base_value_cache.shape}")
 
                                 pair_list = entry
 
                                 projected_kv_list = []
                                 source_kv_list = []
+                                logger.debug(f"Start KV Cache Projection")
                                 for source_model_layer_idx, projector_idx in pair_list:
+                                    logger.debug(f"Using source model layer {source_model_layer_idx} with projector {projector_idx}")
                                     source_key_cache, source_value_cache = self.kv_cache_dict[self.base_model_idx][source_model_idx][source_model_layer_idx]
                                     new_source_key_cache = source_key_cache[:, :, start:end, :]
                                     new_source_value_cache = source_value_cache[:, :, start:end, :]
@@ -444,6 +481,7 @@ class RosettaModel(nn.Module):
                                     source_kv_list.append(new_source_kv_cache)
 
                                 # Aggregate within this source (if multiple projectors per source)
+                                # 先忽略这部分罢，paper没写
                                 use_aggregator = (
                                     len(projected_kv_list) > 1 and
                                     len(self.aggregator_list) > 0 and
@@ -491,6 +529,7 @@ class RosettaModel(nn.Module):
                     output.past_key_values = curr_base_kv_cache
                                                                              
         # use base model for decode phase
+        # base model default decode
         else:
             # Handle list input format for decode phase as well
             decode_input_ids = input_ids[self.base_model_idx] if isinstance(input_ids, list) else input_ids

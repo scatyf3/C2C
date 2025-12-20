@@ -33,8 +33,6 @@ inputs = tokenizer(input_text, return_tensors="pt").to(device)
 instruction_index = torch.tensor([1, 0], dtype=torch.long).repeat(inputs['input_ids'].shape[1] - 1, 1).unsqueeze(0).to(device)
 label_index = torch.tensor([-1, 0], dtype=torch.long).repeat(1, 1).unsqueeze(0).to(device)
 kv_cache_index = [instruction_index, label_index]
-logger.info(f"kv_cache_index: {kv_cache_index}")
-
 with torch.no_grad():
     sampling_params = {
         'do_sample': False,
