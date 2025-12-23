@@ -10,6 +10,7 @@ from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_utils import PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 import json
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -412,6 +413,9 @@ class RosettaModel(nn.Module):
                             if had_gc:
                                 model.gradient_checkpointing_disable()
 
+                            # 开始计时：teacher model生成KV cache
+                            teacher_kv_start = time.time()
+                            
                             with torch.no_grad():
                                 out = model(
                                     input_ids=source_prefill_input_ids,
@@ -422,6 +426,13 @@ class RosettaModel(nn.Module):
                                     return_dict=True,
                                 )
                                 curr_source_kv_cache = out.past_key_values
+                            
+                            # 结束计时：teacher model生成KV cache
+                            teacher_kv_end = time.time()
+                            if hasattr(self, 'profiling_data'):
+                                self.profiling_data['teacher_kv_generation_time'] += (teacher_kv_end - teacher_kv_start)
+                                self.profiling_data['teacher_kv_generation_count'] += 1
+                                
                         finally:
                             if had_gc:
                                 model.gradient_checkpointing_enable()
@@ -468,6 +479,10 @@ class RosettaModel(nn.Module):
                                 projected_kv_list = []
                                 source_kv_list = []
                                 logger.debug(f"Start KV Cache Projection")
+                                
+                                # 开始计时：KV cache投射
+                                projection_start = time.time()
+                                
                                 for source_model_layer_idx, projector_idx in pair_list:
                                     logger.debug(f"Using source model layer {source_model_layer_idx} with projector {projector_idx}")
                                     source_key_cache, source_value_cache = self.kv_cache_dict[self.base_model_idx][source_model_idx][source_model_layer_idx]
@@ -480,6 +495,12 @@ class RosettaModel(nn.Module):
                                     )
                                     projected_kv_list.append((projected_key, projected_value))
                                     source_kv_list.append(new_source_kv_cache)
+                                
+                                # 结束计时：KV cache投射
+                                projection_end = time.time()
+                                if hasattr(self, 'profiling_data'):
+                                    self.profiling_data['kv_projection_time'] += (projection_end - projection_start)
+                                    self.profiling_data['kv_projection_count'] += 1
 
                                 # Aggregate within this source (if multiple projectors per source)
                                 # 先忽略这部分罢，paper没写

@@ -1,3 +1,10 @@
+
+
+```
+conda activate /scratch/yf3005/rosetta
+python demo.py &> demo.log
+```
+
 <div align="center">
   <img src="resource/logo.png" alt="Cache-to-Cache Logo" width="100"/>
   

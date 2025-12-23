@@ -24,3 +24,10 @@ run.sh
 test.py
 script/train/SFT_train_debug.py
 pytorch/
+
+# misc
+*.log
+*.json
+*.csv
+*.tsv
+*.jsonl
