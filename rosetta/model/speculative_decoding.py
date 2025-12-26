@@ -128,8 +128,8 @@ class SpeculativeDecoder:
         projector_list: List,
         projector_config: dict,
         gamma: int = 4,
-        fuse_kv: bool = True,
-        wrapper = None,  # C2C wrapper for proper prefill
+        decode_fusion: bool = True,
+        prefill_fusion = None,  # C2C wrapper for proper prefill
     ):
         """
         Args:
@@ -138,23 +138,23 @@ class SpeculativeDecoder:
             projector_list: List of projector modules for KV fusion
             projector_config: Configuration dict mapping layers and projectors
             gamma: Number of tokens to speculate (K in the paper)
-            fuse_kv: Whether to fuse target KV cache into draft
-            wrapper: C2C RosettaModel wrapper (optional, for proper multi-model prefill)
+            decode_fusion: Whether to fuse target KV cache into draft during generation
+            prefill_fusion: C2C RosettaModel wrapper (optional, for prefill-stage multi-model fusion)
         """
         self.draft_model = draft_model
         self.target_model = target_model
         self.projector_list = projector_list
         self.projector_config = projector_config
         self.gamma = gamma
-        self.fuse_kv = fuse_kv
-        self.wrapper = wrapper
+        self.decode_fusion = decode_fusion
+        self.prefill_fusion = prefill_fusion
         # Statistics
         self.total_tokens = 0
         self.accepted_tokens = 0
         self.draft_calls = 0
         self.target_calls = 0
         self.accepted_lengths = []  # 记录每次accepted长度
-    
+    # 记录接受长度，接受率之类的统计数据
     def reset_stats(self):
         """Reset statistics counters"""
         self.total_tokens = 0
@@ -175,7 +175,9 @@ class SpeculativeDecoder:
             "draft_calls": self.draft_calls,
             "target_calls": self.target_calls,
         }
-
+    
+    # 生成num_tokens 个 draft token
+    # TLDR: draft
     @torch.no_grad()
     def generate_draft_candidates(
         self,
@@ -191,6 +193,7 @@ class SpeculativeDecoder:
         current_attention_mask = attention_mask
         for _ in range(num_tokens):
             self.draft_calls += 1
+            # Forward pass on draft model
             outputs = self.draft_model(
                 input_ids=current_input,
                 attention_mask=current_attention_mask,
@@ -198,10 +201,12 @@ class SpeculativeDecoder:
                 use_cache=True,
                 return_dict=True,
             )
+            # sample next token
             logits = outputs.logits[:, -1, :]
             candidate_logits.append(logits)
             next_token = torch.argmax(logits, dim=-1, keepdim=True)
             candidate_ids.append(next_token)
+            # Update inputs for next iteration 
             current_input = next_token
             current_past = outputs.past_key_values
             current_attention_mask = torch.cat([
@@ -210,10 +215,11 @@ class SpeculativeDecoder:
                           device=current_attention_mask.device,
                           dtype=current_attention_mask.dtype)
             ], dim=1)
+        # list to tensor
         candidate_ids = torch.cat(candidate_ids, dim=1)
         return candidate_ids, candidate_logits, current_past
 
-    
+    # target model verify candidate tokens
     @torch.no_grad()
     def verify_candidates(
         self,
@@ -243,9 +249,11 @@ class SpeculativeDecoder:
         
         # Concatenate prefix and candidates for parallel verification
         # Shape: (batch, prefix_len + K)
+        # 合并获得完整input token
         full_input = torch.cat([prefix_ids, candidate_ids], dim=1)
         
         # Forward pass on target model (processes all K tokens in parallel)
+        # target model forward
         outputs = self.target_model(
             input_ids=full_input,
             attention_mask=attention_mask,
@@ -253,7 +261,7 @@ class SpeculativeDecoder:
             use_cache=True,
             return_dict=True,
         )
-        
+
         target_logits = outputs.logits  # (batch, prefix_len + K, vocab_size)
         target_kv_cache = outputs.past_key_values
         
@@ -263,15 +271,18 @@ class SpeculativeDecoder:
         batch_size = candidate_ids.shape[0]
         prefix_len = prefix_ids.shape[1]
         
+        # 遍历draft token里的每一步
         for i in range(candidate_ids.shape[1]):
             # Target's prediction at position (prefix_len + i - 1)
             # corresponds to candidate at position i
-            if prefix_len + i > 0:
+            if prefix_len + i > 0: # 据说是为处理空前缀产生的问题
+                # greedy sample 当前位置的token
                 target_pred_logits = target_logits[:, prefix_len + i - 1, :]
                 target_pred_token = torch.argmax(target_pred_logits, dim=-1)
                 candidate_token = candidate_ids[:, i]
                 
                 # Check if candidate matches target's prediction
+                # 判断从target model解的logsitics和draft model生成的token是否一致
                 if torch.all(target_pred_token == candidate_token):
                     num_accepted += 1
                 else:
@@ -313,9 +324,10 @@ class SpeculativeDecoder:
         Returns:
             Updated draft_kv_cache
         """
-        if not self.fuse_kv or not self.projector_config:
+        if not self.decode_fusion or not self.projector_config:
             return draft_kv_cache
         
+        # 计算需要project的kv
         end_pos = start_pos + num_tokens
         
         # Iterate through projector configuration
@@ -327,6 +339,7 @@ class SpeculativeDecoder:
         base_idx = 0  # draft model index
         target_idx = 1  # target model index
         
+        # 打印信息，处理conifg
         logger.info(f"fuse_kv_caches called: start_pos={start_pos}, num_tokens={num_tokens}, end_pos={start_pos+num_tokens}")
         logger.info(f"Draft KV cache: {len(draft_kv_cache.key_cache) if draft_kv_cache else 0} layers")
         logger.info(f"Target KV cache: {len(target_kv_cache.key_cache) if target_kv_cache else 0} layers")
@@ -346,6 +359,7 @@ class SpeculativeDecoder:
         
         # Apply projections for each configured layer
         logger.info(f"Applying projections for layers: {list(self.projector_config[base_idx][target_idx].keys())}")
+        # Iterate through each draft layer to update
         for draft_layer_idx, layer_config in self.projector_config[base_idx][target_idx].items():
             for target_layer_idx, projector_idx in layer_config:
                 projector = self.projector_list[projector_idx]
@@ -402,9 +416,9 @@ class SpeculativeDecoder:
         
         # Initialize KV caches with prefill
         logger.info("="*80)
-        logger.info(f"Starting prefill with wrapper={'YES' if self.wrapper else 'NO'}")
+        logger.info(f"Starting prefill with prefill_fusion={'YES' if self.prefill_fusion else 'NO'}")
         
-        if self.wrapper is not None:
+        if self.prefill_fusion is not None:
             # Use C2C wrapper for proper multi-model prefill with KV fusion
             # Create kv_cache_index for prefill
             seq_len = input_ids.shape[1]
@@ -418,25 +432,25 @@ class SpeculativeDecoder:
             
             logger.info(f"Created kv_cache_index with {len(kv_cache_index)} sections")
             
-            # Perform prefill through wrapper to get draft model's cache
-            logger.info("Calling wrapper.forward() for draft model...")
-            wrapper_outputs = self.wrapper(
+            # Perform prefill through prefill_fusion wrapper to get draft model's cache
+            logger.info("Calling prefill_fusion.forward() for draft model...")
+            wrapper_outputs = self.prefill_fusion(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 kv_cache_index=kv_cache_index,
                 use_cache=True,
             )
-            logger.info(f"Wrapper forward completed")
+            logger.info(f"Prefill fusion forward completed")
             
-            # Get draft (base) model's cache from wrapper
-            base_idx = self.wrapper.base_model_idx
+            # Get draft (base) model's cache from prefill_fusion wrapper
+            base_idx = self.prefill_fusion.base_model_idx
             logger.info(f"Base model index: {base_idx}")
-            logger.info(f"Wrapper kv_cache_dict keys: {list(self.wrapper.kv_cache_dict.keys())}")
+            logger.info(f"Prefill fusion kv_cache_dict keys: {list(self.prefill_fusion.kv_cache_dict.keys())}")
             
-            if base_idx in self.wrapper.kv_cache_dict:
-                logger.info(f"kv_cache_dict[{base_idx}] keys: {list(self.wrapper.kv_cache_dict[base_idx].keys())}")
-                if base_idx in self.wrapper.kv_cache_dict[base_idx]:
-                    draft_kv_cache = self.wrapper.kv_cache_dict[base_idx][base_idx]
+            if base_idx in self.prefill_fusion.kv_cache_dict:
+                logger.info(f"kv_cache_dict[{base_idx}] keys: {list(self.prefill_fusion.kv_cache_dict[base_idx].keys())}")
+                if base_idx in self.prefill_fusion.kv_cache_dict[base_idx]:
+                    draft_kv_cache = self.prefill_fusion.kv_cache_dict[base_idx][base_idx]
                     if draft_kv_cache:
                         logger.info(f"✓ Got draft KV cache: {len(draft_kv_cache.key_cache)} layers, seq_len={draft_kv_cache.key_cache[0].shape[2] if len(draft_kv_cache.key_cache) > 0 else 0}")
                     else:
@@ -450,7 +464,7 @@ class SpeculativeDecoder:
                 draft_kv_cache = None
             
             if draft_kv_cache is None:
-                logger.warning("Could not get draft KV cache from wrapper, using direct call")
+                logger.warning("Could not get draft KV cache from prefill_fusion wrapper, using direct call")
                 draft_outputs = self.draft_model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -460,7 +474,7 @@ class SpeculativeDecoder:
                 draft_kv_cache = draft_outputs.past_key_values
                 logger.info(f"Generated draft KV cache via direct call: {len(draft_kv_cache.key_cache)} layers")
             
-            # For target model: wrapper only generates teacher cache for non-final sections
+            # For target model: prefill_fusion wrapper only generates teacher cache for non-final sections
             # For speculative decoding inference, we need to explicitly generate it
             logger.info("Generating target model KV cache explicitly for speculative decoding...")
             target_outputs = self.target_model(
@@ -587,7 +601,7 @@ class SpeculativeDecoderNoKV(SpeculativeDecoder):
     """Baseline speculative decoder without KV cache fusion"""
     
     def __init__(self, *args, **kwargs):
-        kwargs['fuse_kv'] = False
+        kwargs['decode_fusion'] = False
         super().__init__(*args, **kwargs)
     
     @torch.no_grad()

@@ -96,15 +96,15 @@ def format_prompt(example, dataset_name):
     return str(example)
 
 
-def benchmark_standard_generation(model, tokenizer, prompts, max_new_tokens=256, device="cuda"):
-    """Benchmark standard generation (no speculation)"""
+def benchmark_teacher_generation(teacher_model, tokenizer, prompts, max_new_tokens=256, device="cuda"):
+    """Benchmark teacher model direct generation (baseline)"""
     results = {
         "latencies": [],
         "tokens_per_second": [],
         "total_tokens": 0,
     }
     
-    for prompt_text in tqdm(prompts, desc="Standard Generation"):
+    for prompt_text in tqdm(prompts, desc="Teacher Model (Baseline)"):
         # Prepare input
         prompt = [{"role": "user", "content": prompt_text}]
         input_text = tokenizer.apply_chat_template(
@@ -112,14 +112,7 @@ def benchmark_standard_generation(model, tokenizer, prompts, max_new_tokens=256,
         )
         inputs = tokenizer(input_text, return_tensors="pt").to(device)
         
-        # Create kv_cache_index
-        instruction_index = torch.tensor([1, 0], dtype=torch.long).repeat(
-            inputs['input_ids'].shape[1] - 1, 1
-        ).unsqueeze(0).to(device)
-        label_index = torch.tensor([-1, 0], dtype=torch.long).repeat(1, 1).unsqueeze(0).to(device)
-        kv_cache_index = [instruction_index, label_index]
-        
-        # Generate
+        # Generate directly with teacher model
         torch.cuda.synchronize()
         start_time = time.perf_counter()
         
@@ -128,7 +121,7 @@ def benchmark_standard_generation(model, tokenizer, prompts, max_new_tokens=256,
                 'do_sample': False,
                 'max_new_tokens': max_new_tokens
             }
-            outputs = model.generate(**inputs, kv_cache_index=kv_cache_index, **sampling_params)
+            outputs = teacher_model.generate(**inputs, **sampling_params)
         
         torch.cuda.synchronize()
         end_time = time.perf_counter()
@@ -144,7 +137,7 @@ def benchmark_standard_generation(model, tokenizer, prompts, max_new_tokens=256,
     return results
 
 
-def benchmark_speculative_generation(model, tokenizer, prompts, max_new_tokens=256, gamma=4, device="cuda", fuse_kv=True):
+def benchmark_speculative_generation(model, tokenizer, prompts, max_new_tokens=256, gamma=4, device="cuda", prefill_fusion=True, decode_fusion=True):
     """Benchmark speculative decoding generation"""
     results = {
         "latencies": [],
@@ -155,7 +148,7 @@ def benchmark_speculative_generation(model, tokenizer, prompts, max_new_tokens=2
         "average_accepted_lengths": [],
     }
     
-    desc = f"Speculative (γ={gamma}, fuse_kv={'on' if fuse_kv else 'off'})"
+    desc = f"Speculative (γ={gamma}, prefill={'on' if prefill_fusion else 'off'}, decode={'on' if decode_fusion else 'off'})"
     for prompt_text in tqdm(prompts, desc=desc):
         # Prepare input
         prompt = [{"role": "user", "content": prompt_text}]
@@ -175,7 +168,8 @@ def benchmark_speculative_generation(model, tokenizer, prompts, max_new_tokens=2
                 max_new_tokens=max_new_tokens,
                 gamma=gamma,
                 return_stats=True,
-                fuse_kv=fuse_kv,
+                prefill_fusion=prefill_fusion,
+                decode_fusion=decode_fusion,
             )
         
         torch.cuda.synchronize()
@@ -267,6 +261,9 @@ def main():
     rosetta_model, tokenizer = load_rosetta_model(model_config, eval_config={}, device=torch.device("cuda"))
     device = rosetta_model.device
     
+    # Get teacher model for baseline
+    teacher_model = rosetta_model.model_list[1]  # Teacher model is at index 1
+    
     print(f"Model loaded on {device}")
     print(f"Base model: {args.base_model}")
     print(f"Teacher model: {args.teacher_model}")
@@ -282,103 +279,110 @@ def main():
             "base_model": args.base_model,
             "teacher_model": args.teacher_model,
         },
-        "standard": None,
-        "speculative": None,
+        "baseline_teacher": None,
+        "speculative_prefill_on_decode_on": None,
+        "speculative_prefill_on_decode_off": None,
+        "speculative_prefill_off_decode_on": None,
+        "speculative_prefill_off_decode_off": None,
     }
     
-    # Standard generation
+    # Baseline: Teacher model direct generation
     if not args.skip_standard:
         print(f"\n{'='*80}")
-        print("Running Standard Generation Benchmark")
+        print("Running Baseline: Teacher Model Direct Generation")
         print(f"{'='*80}\n")
         
-        standard_results = benchmark_standard_generation(
-            model=rosetta_model,
+        baseline_results = benchmark_teacher_generation(
+            teacher_model=teacher_model,
             tokenizer=tokenizer,
             prompts=prompts,
             max_new_tokens=args.max_new_tokens,
             device=device,
         )
         
-        standard_stats = compute_statistics(standard_results)
-        benchmark_results["standard"] = {
-            "raw_results": standard_results,
-            "statistics": standard_stats,
+        baseline_stats = compute_statistics(baseline_results)
+        benchmark_results["baseline_teacher"] = {
+            "raw_results": baseline_results,
+            "statistics": baseline_stats,
         }
         
-        print("\nStandard Generation Results:")
-        print(f"  Mean latency: {standard_stats['mean_latency']:.3f}s ± {standard_stats['std_latency']:.3f}s")
-        print(f"  Median latency: {standard_stats['median_latency']:.3f}s")
-        print(f"  Mean throughput: {standard_stats['mean_tokens_per_second']:.2f} tokens/s")
-        print(f"  Total tokens: {standard_stats['total_tokens']}")
+        print("\nBaseline (Teacher Model) Results:")
+        print(f"  Mean latency: {baseline_stats['mean_latency']:.3f}s ± {baseline_stats['std_latency']:.3f}s")
+        print(f"  Median latency: {baseline_stats['median_latency']:.3f}s")
+        print(f"  Mean throughput: {baseline_stats['mean_tokens_per_second']:.2f} tokens/s")
+        print(f"  Total tokens: {baseline_stats['total_tokens']}")
     
-    # Speculative generation (with and without KV fusion)
+    # Speculative generation: Test 4 configurations
+    if not args.skip_speculative:
+        configs = [
+            ("prefill_on_decode_on", True, True, "Prefill=ON, Decode=ON (Full C2C)"),
+            ("prefill_on_decode_off", True, False, "Prefill=ON, Decode=OFF"),
+            ("prefill_off_decode_on", False, True, "Prefill=OFF, Decode=ON"),
+            ("prefill_off_decode_off", False, False, "Prefill=OFF, Decode=OFF (No Fusion)"),
+        ]
+        
+        for config_name, prefill_fusion, decode_fusion, description in configs:
+            print(f"\n{'='*80}")
+            print(f"Running Speculative Decoding: {description}")
+            print(f"{'='*80}\n")
+            
+            spec_results = benchmark_speculative_generation(
+                model=rosetta_model,
+                tokenizer=tokenizer,
+                prompts=prompts,
+                max_new_tokens=args.max_new_tokens,
+                gamma=args.gamma,
+                device=device,
+                prefill_fusion=prefill_fusion,
+                decode_fusion=decode_fusion,
+            )
+            
+            spec_stats = compute_statistics(spec_results)
+            benchmark_results[f"speculative_{config_name}"] = {
+                "raw_results": spec_results,
+                "statistics": spec_stats,
+            }
+            
+            print(f"\nSpeculative Results ({description}):")
+            print(f"  Mean latency: {spec_stats['mean_latency']:.3f}s ± {spec_stats['std_latency']:.3f}s")
+            print(f"  Median latency: {spec_stats['median_latency']:.3f}s")
+            print(f"  Mean throughput: {spec_stats['mean_tokens_per_second']:.2f} tokens/s")
+            print(f"  Mean acceptance rate: {spec_stats['mean_acceptance_rate']:.2%} ± {spec_stats['std_acceptance_rate']:.2%}")
+            print(f"  Mean accepted length: {spec_stats['mean_accepted_length']:.2f} ± {spec_stats['std_accepted_length']:.2f}")
+            print(f"  Mean speedup: {spec_stats['mean_speedup']:.2f}x ± {spec_stats['std_speedup']:.2f}x")
+            print(f"  Total tokens: {spec_stats['total_tokens']}")
+
+    # Compare all results
     if not args.skip_speculative:
         print(f"\n{'='*80}")
-        print(f"Running Speculative Generation Benchmark (γ={args.gamma}, fuse_kv=on)")
+        print("Summary Comparison: All Configurations")
         print(f"{'='*80}\n")
-        speculative_results = benchmark_speculative_generation(
-            model=rosetta_model,
-            tokenizer=tokenizer,
-            prompts=prompts,
-            max_new_tokens=args.max_new_tokens,
-            gamma=args.gamma,
-            device=device,
-            fuse_kv=True,
-        )
-        speculative_stats = compute_statistics(speculative_results)
-        benchmark_results["speculative_fuse_kv"] = {
-            "raw_results": speculative_results,
-            "statistics": speculative_stats,
-        }
-        print("\nSpeculative Generation Results (KV Fused):")
-        print(f"  Mean latency: {speculative_stats['mean_latency']:.3f}s ± {speculative_stats['std_latency']:.3f}s")
-        print(f"  Median latency: {speculative_stats['median_latency']:.3f}s")
-        print(f"  Mean throughput: {speculative_stats['mean_tokens_per_second']:.2f} tokens/s")
-        print(f"  Mean acceptance rate: {speculative_stats['mean_acceptance_rate']:.2%} ± {speculative_stats['std_acceptance_rate']:.2%}")
-        print(f"  Mean accepted length: {speculative_stats['mean_accepted_length']:.2f} ± {speculative_stats['std_accepted_length']:.2f}")
-        print(f"  Mean speedup: {speculative_stats['mean_speedup']:.2f}x ± {speculative_stats['std_speedup']:.2f}x")
-        print(f"  Total tokens: {speculative_stats['total_tokens']}")
-
-        print(f"\n{'='*80}")
-        print(f"Running Speculative Generation Benchmark (γ={args.gamma}, fuse_kv=off)")
-        print(f"{'='*80}\n")
-        speculative_results_nokv = benchmark_speculative_generation(
-            model=rosetta_model,
-            tokenizer=tokenizer,
-            prompts=prompts,
-            max_new_tokens=args.max_new_tokens,
-            gamma=args.gamma,
-            device=device,
-            fuse_kv=False,
-        )
-        speculative_stats_nokv = compute_statistics(speculative_results_nokv)
-        benchmark_results["speculative_no_fuse_kv"] = {
-            "raw_results": speculative_results_nokv,
-            "statistics": speculative_stats_nokv,
-        }
-        print("\nSpeculative Generation Results (No KV Fusion):")
-        print(f"  Mean latency: {speculative_stats_nokv['mean_latency']:.3f}s ± {speculative_stats_nokv['std_latency']:.3f}s")
-        print(f"  Median latency: {speculative_stats_nokv['median_latency']:.3f}s")
-        print(f"  Mean throughput: {speculative_stats_nokv['mean_tokens_per_second']:.2f} tokens/s")
-        print(f"  Mean acceptance rate: {speculative_stats_nokv['mean_acceptance_rate']:.2%} ± {speculative_stats_nokv['std_acceptance_rate']:.2%}")
-        print(f"  Mean accepted length: {speculative_stats_nokv['mean_accepted_length']:.2f} ± {speculative_stats_nokv['std_accepted_length']:.2f}")
-        print(f"  Mean speedup: {speculative_stats_nokv['mean_speedup']:.2f}x ± {speculative_stats_nokv['std_speedup']:.2f}x")
-        print(f"  Total tokens: {speculative_stats_nokv['total_tokens']}")
-
-    # Compare results
-    if benchmark_results.get("speculative_fuse_kv") and benchmark_results.get("speculative_no_fuse_kv"):
-        print(f"\n{'='*80}")
-        print("Comparison (KV Fusion vs No Fusion)")
-        print(f"{'='*80}\n")
-        stats_kv = benchmark_results["speculative_fuse_kv"]["statistics"]
-        stats_nokv = benchmark_results["speculative_no_fuse_kv"]["statistics"]
-        print(f"  Acceptance rate: {stats_kv['mean_acceptance_rate']:.2%} (fuse) vs {stats_nokv['mean_acceptance_rate']:.2%} (no fuse)")
-        print(f"  Avg accepted length: {stats_kv['mean_accepted_length']:.2f} (fuse) vs {stats_nokv['mean_accepted_length']:.2f} (no fuse)")
-        print(f"  Speedup: {stats_kv['mean_speedup']:.2f}x (fuse) vs {stats_nokv['mean_speedup']:.2f}x (no fuse)")
-        print(f"  Throughput: {stats_kv['mean_tokens_per_second']:.2f} (fuse) vs {stats_nokv['mean_tokens_per_second']:.2f} (no fuse)")
-        print(f"  Latency: {stats_kv['mean_latency']:.3f}s (fuse) vs {stats_nokv['mean_latency']:.3f}s (no fuse)")
-        print(f"  Total tokens: {stats_kv['total_tokens']} (fuse) vs {stats_nokv['total_tokens']} (no fuse)")
+        
+        config_labels = [
+            ("baseline_teacher", "Baseline (Teacher)"),
+            ("speculative_prefill_on_decode_on", "Spec: Prefill=ON, Decode=ON"),
+            ("speculative_prefill_on_decode_off", "Spec: Prefill=ON, Decode=OFF"),
+            ("speculative_prefill_off_decode_on", "Spec: Prefill=OFF, Decode=ON"),
+            ("speculative_prefill_off_decode_off", "Spec: Prefill=OFF, Decode=OFF"),
+        ]
+        
+        print(f"{'Configuration':<40} {'Latency (s)':<15} {'Throughput':<15} {'Accept Rate':<15} {'Speedup':<10}")
+        print("-" * 95)
+        
+        for config_key, label in config_labels:
+            if benchmark_results.get(config_key):
+                stats = benchmark_results[config_key]["statistics"]
+                latency = f"{stats['mean_latency']:.3f}"
+                throughput = f"{stats['mean_tokens_per_second']:.2f} tok/s"
+                
+                if 'mean_acceptance_rate' in stats:
+                    accept_rate = f"{stats['mean_acceptance_rate']:.2%}"
+                    speedup = f"{stats['mean_speedup']:.2f}x"
+                else:
+                    accept_rate = "N/A"
+                    speedup = "N/A"
+                
+                print(f"{label:<40} {latency:<15} {throughput:<15} {accept_rate:<15} {speedup:<10}")
     
     # Save results
     subject_name = subject or "main"

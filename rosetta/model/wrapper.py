@@ -808,6 +808,7 @@ class RosettaModel(nn.Module):
             return ModelOutput(**result)
         return all_input_ids
     
+    # add to try c2c for speculative decoding
     def speculative_generate(
         self,
         input_ids: torch.Tensor,
@@ -842,6 +843,7 @@ class RosettaModel(nn.Module):
         Returns:
             Generated sequences (and optionally statistics)
         """
+        # 调用已经写好的方法
         from rosetta.model.speculative_decoding import SpeculativeDecoder, SpeculativeDecoderNoKV
 
         # Ensure we have at least 2 models (draft and target)
@@ -849,9 +851,11 @@ class RosettaModel(nn.Module):
             raise ValueError("Speculative decoding requires at least 2 models (draft and target)")
 
         # Setup decoder
+        # base model 生成，teacher model验证，这是正确的
         draft_model = self.model_list[self.base_model_idx]
         target_model = self.model_list[1]  # Assume second model is the teacher/target
-
+		
+		# init方法
         if not fuse_kv:
             decoder = SpeculativeDecoderNoKV(
                 draft_model=draft_model,
@@ -874,6 +878,7 @@ class RosettaModel(nn.Module):
             )
 
         # Get default EOS/PAD tokens if not provided
+        # 一些特殊token的处理，应该属于杂七杂八
         base_model = self.model_list[self.base_model_idx]
         gen_cfg = getattr(base_model, "generation_config", None)
         cfg_obj = gen_cfg if gen_cfg is not None else getattr(base_model, "config", None)
@@ -886,6 +891,7 @@ class RosettaModel(nn.Module):
             pad_token_id = eos_token_id if isinstance(eos_token_id, int) else eos_token_id[0]
 
         # Generate
+        # 调用decoder的生成
         result = decoder.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
