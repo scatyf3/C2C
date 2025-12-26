@@ -807,3 +807,92 @@ class RosettaModel(nn.Module):
                 result["scores"] = scores
             return ModelOutput(**result)
         return all_input_ids
+    
+    def speculative_generate(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        max_new_tokens: int = 100,
+        gamma: int = 4,
+        eos_token_id: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
+        temperature: float = 1.0,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        return_stats: bool = False,
+        fuse_kv: bool = True,
+        **kwargs,
+    ):
+        """
+        Speculative decoding with KV cache fusion
+        
+        Args:
+            input_ids: Input token IDs
+            attention_mask: Attention mask
+            max_new_tokens: Maximum number of tokens to generate
+            gamma: Number of candidate tokens to speculate (K)
+            eos_token_id: End-of-sequence token ID
+            pad_token_id: Padding token ID
+            temperature: Sampling temperature
+            top_p: Nucleus sampling threshold
+            top_k: Top-k sampling threshold
+            return_stats: Whether to return generation statistics
+            fuse_kv: Whether to fuse target KV cache into draft
+        
+        Returns:
+            Generated sequences (and optionally statistics)
+        """
+        from rosetta.model.speculative_decoding import SpeculativeDecoder, SpeculativeDecoderNoKV
+
+        # Ensure we have at least 2 models (draft and target)
+        if len(self.model_list) < 2:
+            raise ValueError("Speculative decoding requires at least 2 models (draft and target)")
+
+        # Setup decoder
+        draft_model = self.model_list[self.base_model_idx]
+        target_model = self.model_list[1]  # Assume second model is the teacher/target
+
+        if not fuse_kv:
+            decoder = SpeculativeDecoderNoKV(
+                draft_model=draft_model,
+                target_model=target_model,
+                projector_list=self.projector_list,
+                projector_config=self.projector_dict,
+                gamma=gamma,
+                fuse_kv=False,
+                wrapper=None,  # No wrapper needed for baseline
+            )
+        else:
+            decoder = SpeculativeDecoder(
+                draft_model=draft_model,
+                target_model=target_model,
+                projector_list=self.projector_list,
+                projector_config=self.projector_dict,
+                gamma=gamma,
+                fuse_kv=True,
+                wrapper=self,  # Pass wrapper for proper C2C prefill
+            )
+
+        # Get default EOS/PAD tokens if not provided
+        base_model = self.model_list[self.base_model_idx]
+        gen_cfg = getattr(base_model, "generation_config", None)
+        cfg_obj = gen_cfg if gen_cfg is not None else getattr(base_model, "config", None)
+
+        if eos_token_id is None and cfg_obj is not None:
+            eos_token_id = getattr(cfg_obj, "eos_token_id", None)
+        if pad_token_id is None and cfg_obj is not None:
+            pad_token_id = getattr(cfg_obj, "pad_token_id", None)
+        if pad_token_id is None and eos_token_id is not None:
+            pad_token_id = eos_token_id if isinstance(eos_token_id, int) else eos_token_id[0]
+
+        # Generate
+        result = decoder.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=eos_token_id,
+            pad_token_id=pad_token_id,
+            return_stats=return_stats,
+        )
+
+        return result

@@ -24,6 +24,7 @@ run.sh
 test.py
 script/train/SFT_train_debug.py
 pytorch/
+output/*
 
 # misc
 *.log

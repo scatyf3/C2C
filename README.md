@@ -1,9 +1,36 @@
+## project structure
+- bash: original codebase's script
+- recipe: configs for paper
+- rosetta: source code for this package
+- script: original codebase's script
+- output: 各种乱七八糟的output，和处理output，可视化输出数据的脚本
 
+
+
+
+
+## demo
 
 ```
 conda activate /scratch/yf3005/rosetta
 python demo.py &> demo.log
 ```
+
+## test on dataset
+
+```
+sbatch run_all_benchmarks.sh
+```
+
+where this call `batch_timing_benchmark.py`
+
+## new feature on kv project for speculative 
+
+
+
+---
+
+
 
 <div align="center">
   <img src="resource/logo.png" alt="Cache-to-Cache Logo" width="100"/>
