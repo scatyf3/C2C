@@ -26,7 +26,7 @@ from typing import List, Dict, Any, Tuple, Optional
 import math
 import contextlib
 
-from rosetta.model.wrapper import RosettaModel
+from rosetta.model.wrapper_modify import RosettaModel
 from rosetta.model.projector import create_projector, save_projector
 from rosetta.train.dataset_adapters import ChatDataset, AlignedChatDataset, RosettaDataCollator, create_dataset, BaselineDataCollator, BaselineChatDataset
 from rosetta.model.aligner import TokenAligner, AlignmentStrategy
@@ -823,6 +823,13 @@ def main():
             with sync_ctx:
                 loss = train_step(model, batch, main_tokenizer, training_config["max_length"], device, training_mode)
                 true_loss_value = loss.detach().item()
+                
+                # Skip backward if loss has no gradient (e.g., all labels are -100)
+                if not loss.requires_grad:
+                    if is_main_process:
+                        print(f"\nWarning: Batch {batch_idx} has no gradients (likely all labels are ignore_index). Skipping.")
+                    continue
+                
                 scaled_loss = loss / grad_accum_steps  # Gradient accumulation
                 scaled_loss.backward()
 

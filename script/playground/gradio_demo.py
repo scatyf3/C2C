@@ -27,7 +27,7 @@ import spaces
 ZEROGPU_AVAILABLE = os.getenv("ZERO_GPU", "").lower() == "true" # ZeroGPU support - HuggingFace Spaces sets ZERO_GPU=true when ZeroGPU is available
 
 from rosetta.utils.evaluate import load_rosetta_model, load_hf_model, set_default_chat_template
-from rosetta.model.wrapper import RosettaModel
+from rosetta.model.wrapper_modify import RosettaModel
 from rosetta.baseline.multi_stage import TwoStageInference
 
 

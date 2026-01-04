@@ -146,6 +146,11 @@ def benchmark_speculative_generation(model, tokenizer, prompts, max_new_tokens=2
         "acceptance_rates": [],
         "speedups": [],
         "average_accepted_lengths": [],
+        "prefill_times": [],
+        "decode_times": [],
+        "draft_times": [],
+        "verify_times": [],
+        "fusion_times": [],
     }
     
     desc = f"Speculative (γ={gamma}, prefill={'on' if prefill_fusion else 'off'}, decode={'on' if decode_fusion else 'off'})"
@@ -185,6 +190,11 @@ def benchmark_speculative_generation(model, tokenizer, prompts, max_new_tokens=2
         results["acceptance_rates"].append(stats["acceptance_rate"])
         results["speedups"].append(stats["speedup"])
         results["average_accepted_lengths"].append(stats.get("average_accepted_length", 0))
+        results["prefill_times"].append(stats.get("prefill_time", 0))
+        results["decode_times"].append(stats.get("decode_time", 0))
+        results["draft_times"].append(stats.get("draft_time", 0))
+        results["verify_times"].append(stats.get("verify_time", 0))
+        results["fusion_times"].append(stats.get("fusion_time", 0))
     return results
 
 
@@ -207,6 +217,24 @@ def compute_statistics(results):
     if "average_accepted_lengths" in results:
         stats["mean_accepted_length"] = np.mean(results["average_accepted_lengths"])
         stats["std_accepted_length"] = np.std(results["average_accepted_lengths"])
+    
+    # Timing statistics
+    if "prefill_times" in results and results["prefill_times"]:
+        stats["mean_prefill_time"] = np.mean(results["prefill_times"])
+        stats["std_prefill_time"] = np.std(results["prefill_times"])
+    if "decode_times" in results and results["decode_times"]:
+        stats["mean_decode_time"] = np.mean(results["decode_times"])
+        stats["std_decode_time"] = np.std(results["decode_times"])
+    if "draft_times" in results and results["draft_times"]:
+        stats["mean_draft_time"] = np.mean(results["draft_times"])
+        stats["std_draft_time"] = np.std(results["draft_times"])
+    if "verify_times" in results and results["verify_times"]:
+        stats["mean_verify_time"] = np.mean(results["verify_times"])
+        stats["std_verify_time"] = np.std(results["verify_times"])
+    if "fusion_times" in results and results["fusion_times"]:
+        stats["mean_fusion_time"] = np.mean(results["fusion_times"])
+        stats["std_fusion_time"] = np.std(results["fusion_times"])
+    
     return stats
 
 
@@ -351,6 +379,15 @@ def main():
             print(f"  Mean accepted length: {spec_stats['mean_accepted_length']:.2f} ± {spec_stats['std_accepted_length']:.2f}")
             print(f"  Mean speedup: {spec_stats['mean_speedup']:.2f}x ± {spec_stats['std_speedup']:.2f}x")
             print(f"  Total tokens: {spec_stats['total_tokens']}")
+            
+            # Print timing breakdown
+            if 'mean_prefill_time' in spec_stats:
+                print(f"\n  Timing Breakdown:")
+                print(f"    Prefill time: {spec_stats['mean_prefill_time']:.3f}s ± {spec_stats['std_prefill_time']:.3f}s")
+                print(f"    Decode time:  {spec_stats['mean_decode_time']:.3f}s ± {spec_stats['std_decode_time']:.3f}s")
+                print(f"      - Draft:    {spec_stats['mean_draft_time']:.3f}s ± {spec_stats['std_draft_time']:.3f}s")
+                print(f"      - Verify:   {spec_stats['mean_verify_time']:.3f}s ± {spec_stats['std_verify_time']:.3f}s")
+                print(f"      - Fusion:   {spec_stats['mean_fusion_time']:.3f}s ± {spec_stats['std_fusion_time']:.3f}s")
 
     # Compare all results
     if not args.skip_speculative:
@@ -383,6 +420,26 @@ def main():
                     speedup = "N/A"
                 
                 print(f"{label:<40} {latency:<15} {throughput:<15} {accept_rate:<15} {speedup:<10}")
+        
+        # Detailed timing comparison table
+        print(f"\n{'='*80}")
+        print("Detailed Timing Breakdown (seconds)")
+        print(f"{'='*80}\n")
+        
+        print(f"{'Configuration':<40} {'Prefill':<12} {'Decode':<12} {'Draft':<12} {'Verify':<12} {'Fusion':<12}")
+        print("-" * 100)
+        
+        for config_key, label in config_labels:
+            if benchmark_results.get(config_key):
+                stats = benchmark_results[config_key]["statistics"]
+                
+                prefill = f"{stats.get('mean_prefill_time', 0):.3f}" if 'mean_prefill_time' in stats else "N/A"
+                decode = f"{stats.get('mean_decode_time', 0):.3f}" if 'mean_decode_time' in stats else "N/A"
+                draft = f"{stats.get('mean_draft_time', 0):.3f}" if 'mean_draft_time' in stats else "N/A"
+                verify = f"{stats.get('mean_verify_time', 0):.3f}" if 'mean_verify_time' in stats else "N/A"
+                fusion = f"{stats.get('mean_fusion_time', 0):.3f}" if 'mean_fusion_time' in stats else "N/A"
+                
+                print(f"{label:<40} {prefill:<12} {decode:<12} {draft:<12} {verify:<12} {fusion:<12}")
     
     # Save results
     subject_name = subject or "main"

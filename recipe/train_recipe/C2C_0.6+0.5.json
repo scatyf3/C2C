@@ -29,7 +29,7 @@
         "max_grad_norm": 1.0,
         "gradient_accumulation_steps": 8,
         "per_device_train_batch_size": 4,
-        "num_processes": 8,
+        "num_processes": 1,
         "freeze": ["teacher","base"],
         "seed": 42
     },
@@ -39,9 +39,9 @@
         "eval_steps": 100,
         "wandb_config": {
             "project": "Rosetta",
-            "mode": "online",
-            "entity": "nics-efc",
-            "run_name": "0.6B+0.5B_C2C_general_OpenHermes_500k"
+            "mode": "offline",
+            "entity": "suzuki1968",
+            "run_name": "0.6B+0.5B_C2C_general_OpenHermes_500k_test"
         }
     },
     "data": {

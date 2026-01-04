@@ -16,7 +16,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from rosetta.utils.evaluate import set_default_chat_template
 from rosetta.utils.core import all_sharers_mask, format_sharer_mask
-from rosetta.model.wrapper import RosettaModel
+from rosetta.model.wrapper_modify import RosettaModel
 from rosetta.model.projector import load_projector
 
 def load_model(checkpoint_dirs: list, subfolder: str = "final", device: str = "cuda:0"):

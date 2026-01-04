@@ -154,6 +154,12 @@ class SpeculativeDecoder:
         self.draft_calls = 0
         self.target_calls = 0
         self.accepted_lengths = []  # 记录每次accepted长度
+        # Timing statistics
+        self.prefill_time = 0.0
+        self.decode_time = 0.0
+        self.draft_time = 0.0
+        self.verify_time = 0.0
+        self.fusion_time = 0.0
     # 记录接受长度，接受率之类的统计数据
     def reset_stats(self):
         """Reset statistics counters"""
@@ -162,6 +168,11 @@ class SpeculativeDecoder:
         self.draft_calls = 0
         self.target_calls = 0
         self.accepted_lengths = []
+        self.prefill_time = 0.0
+        self.decode_time = 0.0
+        self.draft_time = 0.0
+        self.verify_time = 0.0
+        self.fusion_time = 0.0
     
     def get_stats(self):
         """Get current statistics"""
@@ -174,6 +185,11 @@ class SpeculativeDecoder:
             "average_accepted_length": average_accepted_length,
             "draft_calls": self.draft_calls,
             "target_calls": self.target_calls,
+            "prefill_time": self.prefill_time,
+            "decode_time": self.decode_time,
+            "draft_time": self.draft_time,
+            "verify_time": self.verify_time,
+            "fusion_time": self.fusion_time,
         }
     
     # 生成num_tokens 个 draft token
@@ -402,6 +418,8 @@ class SpeculativeDecoder:
             generated_ids: Generated token sequence (batch, seq_len + gen_len)
             stats: Generation statistics (if return_stats=True)
         """
+        import time
+        
         self.reset_stats()
         
         batch_size = input_ids.shape[0]
@@ -417,6 +435,10 @@ class SpeculativeDecoder:
         # Initialize KV caches with prefill
         logger.info("="*80)
         logger.info(f"Starting prefill with prefill_fusion={'YES' if self.prefill_fusion else 'NO'}")
+        
+        # Start timing prefill
+        torch.cuda.synchronize()
+        prefill_start = time.perf_counter()
         
         if self.prefill_fusion is not None:
             # Use C2C wrapper for proper multi-model prefill with KV fusion
@@ -510,8 +532,17 @@ class SpeculativeDecoder:
             )
             target_kv_cache = target_outputs.past_key_values
         
+        # End timing prefill
+        torch.cuda.synchronize()
+        prefill_end = time.perf_counter()
+        self.prefill_time = prefill_end - prefill_start
+        
         generated_tokens = 0
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        
+        # Start timing decode phase
+        torch.cuda.synchronize()
+        decode_start = time.perf_counter()
         
         while generated_tokens < max_new_tokens:
             # Step 1: Draft model generates K candidates
@@ -520,14 +551,21 @@ class SpeculativeDecoder:
             # Use last token as input for draft generation
             last_token = current_ids[:, -1:]
             
+            torch.cuda.synchronize()
+            draft_start = time.perf_counter()
             candidate_ids, candidate_logits, new_draft_kv = self.generate_draft_candidates(
                 input_ids=last_token,
                 attention_mask=current_attention_mask,
                 past_key_values=draft_kv_cache,
                 num_tokens=num_candidates,
             )
+            torch.cuda.synchronize()
+            draft_end = time.perf_counter()
+            self.draft_time += draft_end - draft_start
             
             # Step 2: Target model verifies candidates
+            torch.cuda.synchronize()
+            verify_start = time.perf_counter()
             # When using past_key_values, attention_mask should cover both past and new tokens
             # past_kv has seq_len, new tokens are 1 (prefix) + num_candidates
             past_seq_len = target_kv_cache.key_cache[0].shape[2] if target_kv_cache else 0
@@ -538,6 +576,9 @@ class SpeculativeDecoder:
                 attention_mask=verify_attention_mask,
                 past_key_values=target_kv_cache,
             )
+            torch.cuda.synchronize()
+            verify_end = time.perf_counter()
+            self.verify_time += verify_end - verify_start
             
             # Step 3: Update sequences with accepted tokens
             accepted_candidates = candidate_ids[:, :num_accepted]
@@ -565,12 +606,17 @@ class SpeculativeDecoder:
                 logger.info(f"new_target_kv length: {new_target_kv.key_cache[0].shape[2]}")
                 logger.info(f"new_draft_kv length: {new_draft_kv.key_cache[0].shape[2]}")
                 
+                torch.cuda.synchronize()
+                fusion_start_time = time.perf_counter()
                 draft_kv_cache = self.fuse_kv_caches(
                     draft_kv_cache=new_draft_kv,
                     target_kv_cache=new_target_kv,
                     start_pos=fusion_start,
                     num_tokens=num_accepted,
                 )
+                torch.cuda.synchronize()
+                fusion_end_time = time.perf_counter()
+                self.fusion_time += fusion_end_time - fusion_start_time
             else:
                 # No acceptance, rollback to original length + prefix token
                 old_draft_len = draft_kv_cache.key_cache[0].shape[2]
@@ -587,6 +633,11 @@ class SpeculativeDecoder:
                 finished |= (next_token.squeeze(1) == eos_token_id)
                 if torch.all(finished):
                     break
+        
+        # End timing decode phase
+        torch.cuda.synchronize()
+        decode_end = time.perf_counter()
+        self.decode_time = decode_end - decode_start
         
         if return_stats:
             stats = self.get_stats()

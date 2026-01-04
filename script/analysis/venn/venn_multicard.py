@@ -16,7 +16,7 @@ import seaborn as sns
 from typing import Dict, Any, List, Tuple
 
 from rosetta.model.projector import create_projector
-from rosetta.model.wrapper import RosettaModel
+from rosetta.model.wrapper_modify import RosettaModel
 from rosetta.train.dataset_adapters import MMLUChatDataset
 from rosetta.model.projector import create_projector, load_projector
 from rosetta.model.aggregator import WeightedAggregator, load_aggregator

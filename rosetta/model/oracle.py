@@ -14,7 +14,7 @@ try:
 except Exception:
     GreedySearchDecoderOnlyOutput = None
     SampleDecoderOnlyOutput = None
-from rosetta.model.wrapper import RosettaModel
+from rosetta.model.wrapper_modify import RosettaModel
 
 class OracleRosettaModel(nn.Module):
     """

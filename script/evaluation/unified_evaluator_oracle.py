@@ -31,7 +31,7 @@ from rosetta.utils.evaluate import (
     get_option_token_ids,
     build_prompt
 )
-from rosetta.model.wrapper import OracleRosettaModel
+from rosetta.model.wrapper_modify import OracleRosettaModel
 from rosetta.model.aligner import TokenAligner, AlignmentStrategy
 from rosetta.train.dataset_adapters import generate_kv_cache_index
 from transformers import AutoTokenizer

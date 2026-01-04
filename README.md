@@ -22,7 +22,7 @@ python demo.py &> demo.log
 sbatch run_all_benchmarks.sh
 ```
 
-where this call `batch_timing_benchmark.py`
+where this call `comprehensive_timing_benchmark.py`
 
 ## new feature on kv project for speculative 
 

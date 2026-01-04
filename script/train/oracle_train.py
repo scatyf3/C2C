@@ -28,7 +28,7 @@ import contextlib
 # Add the project root to the path
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
 
-from rosetta.model.wrapper import RosettaModel
+from rosetta.model.wrapper_modify import RosettaModel
 from rosetta.model.projector import create_projector, save_projector, TrivialProjector
 from rosetta.model.aggregator import save_aggregator, get_aggregator_class
 from rosetta.train.dataset_adapters import ChatDataset, RosettaDataCollator, create_dataset

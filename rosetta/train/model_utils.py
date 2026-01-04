@@ -6,7 +6,7 @@ import torch
 from typing import Dict, Any, List
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from rosetta.model.wrapper import RosettaModel
+from rosetta.model.wrapper_modify import RosettaModel
 from rosetta.model.projector import create_projector
 
 """

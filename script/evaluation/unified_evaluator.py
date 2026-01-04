@@ -40,7 +40,7 @@ from rosetta.utils.evaluate import (
     apply_generation_config
 )
 from rosetta.utils.matheval import GSM8KEvaluator, MATH500Evaluator
-from rosetta.model.wrapper import RosettaModel
+from rosetta.model.wrapper_modify import RosettaModel
 from rosetta.model.aligner import TokenAligner, AlignmentStrategy
 from rosetta.train.dataset_adapters import generate_kv_cache_index
 from transformers import AutoTokenizer

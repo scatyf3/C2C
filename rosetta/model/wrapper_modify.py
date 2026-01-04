@@ -23,22 +23,11 @@ except Exception:
     GreedySearchDecoderOnlyOutput = None
     SampleDecoderOnlyOutput = None
 
-def clone_kv_cache(kv_cache: DynamicCache, detach: bool = False) -> DynamicCache:
-        """Clone KV cache, optionally detaching from computation graph.
-        
-        Args:
-            kv_cache: Cache to clone
-            detach: If True, detach from computation graph (for inference).
-                   If False, keep gradients (for training).
-        """
+def clone_kv_cache(kv_cache: DynamicCache) -> DynamicCache:
         new_cache = DynamicCache()
         for k, v in zip(kv_cache.key_cache, kv_cache.value_cache):
-            if detach:
-                new_cache.key_cache.append(k.clone().detach())
-                new_cache.value_cache.append(v.clone().detach())
-            else:
-                new_cache.key_cache.append(k.clone())
-                new_cache.value_cache.append(v.clone())
+            new_cache.key_cache.append(k.clone().detach())
+            new_cache.value_cache.append(v.clone().detach())
         return new_cache
 
 def hybrid_to_dynamic(hybrid_cache):
@@ -426,7 +415,6 @@ class RosettaModel(nn.Module):
                         had_gc = getattr(model, "is_gradient_checkpointing", False)
 
                         try:
-                            # Set model to eval mode (but keep gradient computation for training projectors)
                             if was_training:
                                 model.eval()
                             if had_gc:
@@ -435,17 +423,16 @@ class RosettaModel(nn.Module):
                             # 开始计时：teacher model生成KV cache
                             teacher_kv_start = time.time()
                             
-                            # Don't use no_grad() - we need gradients to flow through KV cache to projectors
-                            # Teacher model parameters are frozen (requires_grad=False) so they won't update
-                            out = model(
-                                input_ids=source_prefill_input_ids,
-                                attention_mask=source_prefill_attention_mask,
-                                position_ids=prefill_position_ids,
-                                past_key_values=self.kv_cache_dict[self.base_model_idx][source_model_idx],
-                                use_cache=True,
-                                return_dict=True,
-                            )
-                            curr_source_kv_cache = out.past_key_values
+                            with torch.no_grad():
+                                out = model(
+                                    input_ids=source_prefill_input_ids,
+                                    attention_mask=source_prefill_attention_mask,
+                                    position_ids=prefill_position_ids,
+                                    past_key_values=self.kv_cache_dict[self.base_model_idx][source_model_idx],
+                                    use_cache=True,
+                                    return_dict=True,
+                                )
+                                curr_source_kv_cache = out.past_key_values
                             
                             # 结束计时：teacher model生成KV cache
                             teacher_kv_end = time.time()
@@ -467,8 +454,7 @@ class RosettaModel(nn.Module):
                     sharer_mask = kv_cache_index[i][0][0][0].item()
                     logger.debug(f"Section {i+1}: sharer_mask={sharer_mask}")
                     logger.debug(">0: Bitmask selecting sharers (1 (001)=sharer1, 2 (010)=sharer2, 3 (011)=both, 7 (111)=all three)")
-                    # Clone without detaching to preserve gradients for training
-                    base_cache = clone_kv_cache(curr_base_kv_cache, detach=False)
+                    base_cache = clone_kv_cache(curr_base_kv_cache)
                     parallel_delta_cache = {} if self.multi_source_fusion_mode == "parallel" else None
                     
                     logger.debug("iterating over source models for projection")

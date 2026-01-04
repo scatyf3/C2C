@@ -22,7 +22,7 @@ import re
 # Add the project root to the path
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
 
-from rosetta.model.wrapper import RosettaModel
+from rosetta.model.wrapper_modify import RosettaModel
 from rosetta.model.projector import create_projector
 
 BASE_DIR = Path("/mnt/public")

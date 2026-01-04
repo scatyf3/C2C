@@ -12,7 +12,7 @@ from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 
 from rosetta.model.projector import create_projector
-from rosetta.model.wrapper import RosettaModel
+from rosetta.model.wrapper_modify import RosettaModel
 from rosetta.train.dataset_adapters import MMLUChatDataset
 
 def load_qwen_model(model_name):

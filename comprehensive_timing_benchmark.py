@@ -26,6 +26,8 @@ Usage:
     
     # All subjects in C-Eval
     python comprehensive_timing_benchmark.py --dataset ceval --all_subjects --num_samples 20
+
+好像没用过，归档...
 """
 
 import argparse

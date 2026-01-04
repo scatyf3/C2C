@@ -1,6 +1,7 @@
 """
 Batch timing benchmark script for C2C model
 Processes multiple prompts and saves timing data to JSONL
+C2C agent模式计时
 """
 
 import torch
