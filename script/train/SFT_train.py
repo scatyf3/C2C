@@ -486,6 +486,10 @@ def main():
     Training progress is tracked with Weights & Biases and the original config
     is copied alongside checkpoints for full reproducibility.
     """
+    import logging
+    logger = logging.getLogger()
+    logging.basicConfig(level=logging.INFO)
+    logging.info("Starting SFT training script")
 
     # ------------------------------------------------------------------
     # Configuration loading
@@ -497,6 +501,8 @@ def main():
     parser.add_argument("--eval_only", action="store_true", help="Run evaluation only (no training)")
     args = parser.parse_args()
 
+    logging.info(f"Current arhguments: {args}")
+
     cfg: Dict[str, Any] = load_config(args.config)
 
     # Extract configuration sections
@@ -504,6 +510,7 @@ def main():
     training_config = cfg["training"]
     output_config = cfg["output"]
     data_config = cfg["data"]
+    logging.info(f"config loaded: {cfg}")
 
     # Set seed for reproducibility and enable stricter determinism
     set_seed(seed = training_config["seed"])
@@ -522,6 +529,7 @@ def main():
     # ------------------------------------------------------------------
     # Distributed training setup
     # ------------------------------------------------------------------
+    logging.info("Setting up distributed training (if applicable)…")
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     distributed = world_size > 1
     local_rank = args.local_rank
@@ -542,6 +550,7 @@ def main():
     # ------------------------------------------------------------------
     # Weights & Biases initialisation
     # ------------------------------------------------------------------
+    logging.info("Initialising Weights & Biases…")
     run_name = f"{output_config['wandb_config']['run_name']}_{timestamp}"
     if is_main_process:
         wandb.init(
@@ -557,6 +566,7 @@ def main():
     # ------------------------------------------------------------------
     # Detect training mode and setup models
     # ------------------------------------------------------------------
+    logging.info("Setting up models…")
     training_mode = detect_training_mode(model_config)
     if is_main_process:
         print(f"Training mode: {training_mode}")
@@ -568,22 +578,27 @@ def main():
     # Apply freezing/training configuration based on mode
     if training_mode == "baseline":
         # Check for LoRA or partial training configuration
+        # 不过感觉这个baseline微调是何意味，用 model 简单微调下，用来对比微调 kv projector吗，我们训kv projector应该用不到这些
+        logging.info("Applying training configuration for baseline mode…")
         lora_config = training_config.get("lora", None)
         partial_config = training_config.get("partial_training", None)
         
         if lora_config is not None:
+            logging.info("Setting up LoRA training…")
             if is_main_process:
                 print("Setting up LoRA training...")
             model = setup_lora_model(model, lora_config)
             if is_main_process:
                 print("LoRA setup completed")
         elif partial_config is not None:
+            logging.info("Setting up partial parameter training…")
             if is_main_process:
                 print("Setting up partial parameter training...")
             model = setup_partial_training(model, partial_config)
             if is_main_process:
                 print("Partial training setup completed")
         else:
+            logging.info("No LoRA or partial training configuration found; training all parameters.")
             # Apply freezing based on configuration
             freeze_config = training_config.get("freeze", [])
             if is_main_process:
@@ -594,8 +609,10 @@ def main():
             else:
                 unfreeze_model(model)
     else:  # rosetta mode
+        logging.info("Applying training configuration for Rosetta mode…")
         freeze_config = training_config["freeze"]  # including ["base", "teacher"]
         
+        # 判断哪些freeze，哪些不freeze
         if is_main_process:
             print(f"Applying freeze configuration: {freeze_config}")
         
@@ -617,12 +634,17 @@ def main():
             unfreeze_projectors(model)
 
         for i, projector in enumerate(model.projector_list):
+            # 如果投影层具有“输入依赖型选择器”（selector_depends_on_input），它会强制冻结该选择器的生成器（selector_generator
             if hasattr(projector, 'selector_depends_on_input') and projector.selector_depends_on_input:
+                logging.info(f"Projector {i} has input-dependent selector; freezing selector_generator parameters.")
                 # For input-dependent selectors, unfreeze the selector_generator
                 if hasattr(projector, 'selector_generator'):
                     for param in projector.selector_generator.parameters():
                         param.requires_grad = False
-                    print(f"froze selector_generator parameters in projector {i}")
+                    logging.info(f"froze selector_generator parameters in projector {i}")
+            else:
+                logging.info(f"Projector {i} does not have input-dependent selector or selector is frozen; no action taken.")
+        
 
     # Wrap with DDP if needed
     if distributed:
@@ -635,14 +657,14 @@ def main():
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-    print(f"Percentage of trainable parameters: {trainable_params / total_params * 100:.4f}%")
+    logging.info(f"Total parameters: {total_params:,}")
+    logging.info(f"Trainable parameters: {trainable_params:,}")
+    logging.info(f"Percentage of trainable parameters: {trainable_params / total_params * 100:.4f}%")
 
     # ------------------------------------------------------------------
     # Dataset & dataloaders
     # ------------------------------------------------------------------
-    print("Loading dataset…")
+    logging.info("Loading dataset…")
     # Create dataset using the auto-registration system
     instruct_ds = create_dataset(
         dataset_type=data_config["type"],
@@ -683,6 +705,7 @@ def main():
         eval_sampler = None
 
     # Create collator based on training mode
+    logging.info("Setting up data collator…")
     if training_mode == "baseline":
         collator = BaselineDataCollator(
             tokenizer=main_tokenizer,
@@ -701,6 +724,7 @@ def main():
         raise ValueError(f"Invalid training mode: {training_mode}")
 
     # Ensure per-worker seeding if num_workers > 0
+    logging.info("Setting up data loaders…")
     def _worker_init_fn(worker_id):
         worker_seed = training_config["seed"] + worker_id
         np.random.seed(worker_seed)
@@ -727,6 +751,8 @@ def main():
     # Evaluation-only short-circuit
     # ------------------------------------------------------------------
     if args.eval_only:
+        # 但我们训projector，应该不走这块
+        logging.info("Running evaluation only…")
         if distributed:
             local_eval_loss = evaluate_model(model, eval_loader, main_tokenizer, training_config["max_length"], device, training_mode)
             loss_tensor = torch.tensor([local_eval_loss], device=device, dtype=torch.float32)
@@ -776,6 +802,7 @@ def main():
         other_params = []
 
         for name, param in model.named_parameters():
+            logging.debug(f"Parameter: {name}, requires_grad={param.requires_grad}")
             if param.requires_grad:
                 if "gate" in name:
                     gate_params.append(param)
@@ -816,6 +843,7 @@ def main():
         micro_in_window = 0
 
         for batch_idx, batch in enumerate(train_loader):
+            logging.debug(f"Processing batch {batch_idx + 1}/{len(train_loader)} in epoch {epoch + 1}")
             # Forward/backward with gradient accumulation and DDP no_sync for micro-steps
             is_accum_step = ((batch_idx + 1) % grad_accum_steps) != 0
             sync_ctx = model.no_sync() if distributed and hasattr(model, "no_sync") and is_accum_step else contextlib.nullcontext()
